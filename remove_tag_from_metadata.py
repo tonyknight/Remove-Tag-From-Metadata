@@ -1,50 +1,118 @@
-import os
-import json
-import re
-import exiftool
-from tqdm import tqdm
+import sys
+from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from ui import Ui_Widget
+from PyQt6.QtCore import QThreadPool, QRunnable, pyqtSlot, pyqtSignal, QObject
+from jsonManager import JSONManager, get_list_of_json_files, JsonReplaceWorker
 
-source_directory = 'path/to/your/images'  # Replace with the path to your source directory
 
-def process_file(file_path):
-    updates = []
-    with exiftool.ExifTool() as et:
-        metadata = et.get_metadata(file_path)
-        for tag, value in metadata.items():
-            # Remove 'People' if it's not followed by '/' or '|'
-            new_value = re.sub(r'\bPeople\b(?!\/|\|)', ' ', str(value))
-            if value != new_value:
-                et.execute(b'-overwrite_original', f'-{tag}={new_value}'.encode('utf-8'), file_path.encode('utf-8'))
-                updates.append({
-                    'tag': tag,
-                    'unmodified': value,
-                    'modified': new_value
-                })
-    return updates
+class MainWindow(QMainWindow, Ui_Widget):
+    def __init__(self, *args, **kwargs):
+        super(MainWindow, self).__init__(*args, **kwargs)
+        self.setupUi(self)
 
-def get_image_files(source_directory):
-    for root, _, files in os.walk(source_directory):
-        for file in files:
-            if file.lower().endswith(('.jpg', '.jpeg', '.tiff', '.png', '.gif', '.bmp')):
-                yield os.path.join(root, file)
+        self.json_manager = JSONManager()
 
-# Count the total number of image files
-total_files = sum(1 for _ in get_image_files(source_directory))
+        self.loadFolder.clicked.connect(self.select_folder)
+        self.processJSON.clicked.connect(self.process_folders)
+        self.processJSONButton.clicked.connect(self.process_json_files)
 
-output = []
+    def handle_finished_json_processing(self, num_changes, num_errors):
+        self.total_changes += num_changes
+        self.total_errors += num_errors
 
-# Traverse the directory and subdirectories
-for file_path in tqdm(get_image_files(source_directory), total=total_files, desc="Processing images"):
-    # Process the image and check if it was updated
-    updates = process_file(file_path)
-    if updates:
-        output.append({
-            'filepath': file_path,
-            'updates': updates
-        })
+    def select_folder(self):
+        self.json_manager.select_folder()
+        if self.json_manager.folder_path:
+            self.processJSONProgressLabel.setText(self.json_manager.folder_path)
 
-# Write the output to a JSON file
-with open('removed.json', 'w') as outfile:
-    json.dump(output, outfile, indent=4)
+    def process_folders(self):
+        exiftool_command = self.exiftoolCommand.toPlainText()
+        if not exiftool_command:
+            QMessageBox.warning(self, "Error", "Please provide a valid exiftool command.")
+            return
 
-print("Done.")
+        if not self.json_manager.folder_path:
+            QMessageBox.warning(self, "Error", "Please select a folder first.")
+            return
+
+        self.processJSON.setEnabled(False)
+        self.processJSONProgress.setValue(0)
+        self.processJSONProgressLabel.setText("")
+
+        self.json_manager.process_folders(
+            exiftool_command,
+            self.update_progress,
+            self.update_progress_label,
+            self.handle_error,
+            self.handle_finish
+        )
+
+    def update_progress(self, value):
+        if self.json_manager.num_folders == 0:
+            return
+        current_value = self.processJSONProgress.value()
+        self.processJSONProgress.setValue(current_value + value * (100 / self.json_manager.num_folders))
+
+    def update_progress_label(self, text):
+        self.processJSONProgressLabel.setText(text)
+
+    def handle_error(self, error_msg):
+        self.json_manager.on_error(error_msg)
+
+    def handle_finish(self):
+        self.json_manager.on_finish()
+        self.processJSON.setEnabled(True)
+
+    def process_json_files(self):
+        self.total_changes = 0  # Add this line
+        self.total_errors = 0  # Add this line
+
+        # Get the list of output.json files to process
+        json_files = get_list_of_json_files(self.json_manager.folder_path)
+
+        # Parse the input from the ReplaceText and notReplace text fields
+        replace_text = self.ReplaceText.toPlainText()
+        not_replace = self.notReplace.toPlainText()
+
+        replace_list = [item.strip() for item in replace_text.split(',')]
+        not_replace_list = [item.strip() for item in not_replace.split(',')]
+
+        # Create a QThreadPool to handle multithreading
+        thread_pool = QThreadPool()
+
+        # Create progress and error signals
+        signals = JsonReplaceSignals()
+        signals.progress_signal.connect(self.update_progress)
+        signals.error_signal.connect(self.handle_error)
+        signals.finished_signal.connect(self.handle_finished_json_processing)  # Add this line
+
+        # Iterate through the JSON files and process them using multiple threads
+        for file_path in json_files:
+            worker = JsonReplaceWorker(file_path, replace_list, not_replace_list, signals.progress_signal,
+                                       signals.error_signal, signals.finished_signal,)
+            thread_pool.start(worker)
+
+        # Wait for all the threads to finish
+        thread_pool.waitForDone()
+
+        # Reset the progress bar and display a message when the processing is complete
+        self.jsonProgress.setValue(0)
+        QMessageBox.information(
+            self,
+            "Processing Complete",
+            f"The JSON files have been processed. {self.total_changes} records changed, {self.total_errors} errors encountered."
+        )
+
+
+class JsonReplaceSignals(QObject):
+    progress_signal = pyqtSignal(int)
+    error_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(int, int)  # Add this line
+
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
