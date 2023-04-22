@@ -1,8 +1,12 @@
 import sys
+import os
 from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
 from ui import Ui_Widget
 from PyQt6.QtCore import QThreadPool, QRunnable, pyqtSlot, pyqtSignal, QObject
 from jsonManager import JSONManager, get_list_of_json_files, JsonReplaceWorker
+from metadataWriter import MetadataWriterWorker
+# import pydevd_pycharm
+# pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True, stderrToServer=True, suspend=False)
 
 
 class MainWindow(QMainWindow, Ui_Widget):
@@ -11,10 +15,36 @@ class MainWindow(QMainWindow, Ui_Widget):
         self.setupUi(self)
 
         self.json_manager = JSONManager()
+        self.thread_pool = QThreadPool()
 
         self.loadFolder.clicked.connect(self.select_folder)
         self.processJSON.clicked.connect(self.process_folders)
         self.processJSONButton.clicked.connect(self.process_json_files)
+        self.writeMetadataButton.clicked.connect(self.write_metadata)
+
+    def process_next_directory(self, sorted_year_folders):
+        if sorted_year_folders:
+            year_folder_path = sorted_year_folders.pop(0)
+            write_metadata_worker = MetadataWriterWorker(year_folder_path)
+
+            write_metadata_worker.signals.finished.connect(lambda: self.process_next_directory(sorted_year_folders))
+
+            self.thread_pool.setMaxThreadCount(10)
+            self.thread_pool.start(write_metadata_worker)
+
+    def write_metadata(self):
+        parent_directory = self.json_manager.folder_path
+        if not parent_directory:
+            QMessageBox.warning(self, "Error", "Please select a directory first.")
+            return
+
+        # Get a sorted list of year folders (from lowest to highest)
+        year_folders = [os.path.join(parent_directory, f) for f in os.listdir(parent_directory) if
+                        os.path.isdir(os.path.join(parent_directory, f)) and f.isdigit()]
+        sorted_year_folders = sorted(year_folders, key=lambda x: int(os.path.basename(x)))
+
+        # Process the directories in chronological order
+        self.process_next_directory(sorted_year_folders)
 
     def handle_finished_json_processing(self, num_changes, num_errors):
         self.total_changes += num_changes
@@ -64,8 +94,8 @@ class MainWindow(QMainWindow, Ui_Widget):
         self.processJSON.setEnabled(True)
 
     def process_json_files(self):
-        self.total_changes = 0  # Add this line
-        self.total_errors = 0  # Add this line
+        self.total_changes = 0
+        self.total_errors = 0
 
         # Get the list of output.json files to process
         json_files = get_list_of_json_files(self.json_manager.folder_path)
@@ -108,7 +138,6 @@ class JsonReplaceSignals(QObject):
     progress_signal = pyqtSignal(int)
     error_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(int, int)  # Add this line
-
 
 
 if __name__ == "__main__":

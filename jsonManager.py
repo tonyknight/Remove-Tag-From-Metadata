@@ -6,6 +6,7 @@ import re
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from PyQt6.QtCore import QThread, pyqtSignal, pyqtSlot, QRunnable
 
+
 def get_list_of_json_files(folder_path):
     json_files = []
     for root, dirs, files in os.walk(folder_path):
@@ -126,7 +127,7 @@ class JsonReplaceWorker(QRunnable):
             num_errors = 1
             self.error_signal.emit(f"Error processing file: {self.file_path}\n{str(e)}")
         finally:
-            self.signals.finished_signal.emit(num_changes, num_errors)
+            self.finished_signal.emit(num_changes, num_errors)
 
     def process_json_data(self, data):
         removed_count = 0
@@ -135,11 +136,17 @@ class JsonReplaceWorker(QRunnable):
                 if isinstance(value, list):
                     new_values = []
                     for item in value:
-                        if not any(char in item for char in self.not_replace_list):
-                            if item not in self.replace_list:
-                                new_values.append(item)
-                            else:
-                                removed_count += 1
+                        # Check if the item contains any of the not_replace characters
+                        contains_not_replace_chars = any(char in item for char in self.not_replace_list)
+
+                        # Check if the item contains any of the words in the replace_list
+                        contains_replace_word = any(word in item for word in self.replace_list)
+
+                        # Only remove the item if it contains a word from the replace_list and doesn't contain any not_replace characters
+                        if not contains_not_replace_chars and contains_replace_word:
+                            removed_count += 1
+                        else:
+                            new_values.append(item)
                     image_data[tag] = new_values
         return removed_count
 
